@@ -1,4 +1,8 @@
-# # A simple hydroxide plume
+#
+# "Simple" hydroxide plume
+#
+
+start_time = time_ns()
 
 using Pkg
 using Statistics
@@ -12,25 +16,20 @@ using Oceananigans.Buoyancy
 using Oceananigans.BoundaryConditions
 using Oceananigans.Grids
 using Oceananigans.Forcings
+using Oceananigans.OutputWriters
 
 using Oceananigans.Fields: AveragedField
 using Oceananigans.Utils: minute, hour, GiB, prettytime
-using Oceananigans.OutputWriters: JLD2OutputWriter, FieldSlicer
 
 using LESbrary.Utils: SimulationProgressMessenger
 
-plot_only = false
-
-# To start, we ensure that all packages in the LESbrary environment are installed:
-
 Pkg.instantiate()
 
+plot_only = false # set 'true' to just plot and avoid running another simulation
+
+#
 # Domain
 #
-# We use a three-dimensional domain that's twice as wide as it is deep.
-# We choose this aspect ratio so that the horizontal scale is 4x larger
-# than the boundary layer depth when the boundary layer penetrates half
-# the domain depth.
 
 Nh = 64
 Nz = 64
@@ -44,7 +43,9 @@ surface_temperature = 20
 
 grid = RegularCartesianGrid(size=(Nh, Nh, Nz), x=(-Lx/2, Lx/2), y=(-Ly/2, Ly/2), z=(-Lz, 0))
 
+#
 # Buoyancy and boundary conditions
+#
 
 coriolis = FPlane(f=1e-4)
 
@@ -61,12 +62,16 @@ T_bcs = TracerBoundaryConditions(grid, top = BoundaryCondition(Flux, Qᶿ),
 
 u_bcs = UVelocityBoundaryConditions(grid, top = BoundaryCondition(Flux, surface_momentum_flux))
 
-# Tracer forcing
-
-# # Initial condition and sponge layer
+#
+# Hydroxide source (could also use a Flux boundary condition to similar effect)
+#
 
 OH⁻_source_func(x, y, z, t, p) = 1/p.τ * exp(-z^2 / (2 * p.depth^2) - (x^2 + y^2) / (2 * p.radius^2))
 OH⁻_source = Forcing(OH⁻_source_func, parameters=(τ=hour/4, depth=2, radius=5))
+
+#
+# Model setup
+#
 
 model = IncompressibleModel(architecture = CPU(),
                              timestepper = :RungeKutta3,
@@ -79,44 +84,52 @@ model = IncompressibleModel(architecture = CPU(),
                      boundary_conditions = (T=T_bcs, u=u_bcs),
                                  forcing = (OH⁻=OH⁻_source,))
 
-# # Set Initial condition
+@info "Model setup complete."
+@info @sprintf("Elapsed time so far: %s", prettytime((time_ns() - start_time) * 1e-9))
 
-## Noise with 8 m decay scale
-Ξ(z) = rand() * exp(z / 8)
+#
+# Initial condition
+#
+
+Ξ(z) = rand() * exp(z / 8) # noise with 8 m decay scale
                    
-linear_temperature_profile(x, y, z) = surface_temperature + dTdz * z
+# Linear temperature profile
+linear_profile(x, y, z) = surface_temperature + dTdz * z
 
 # Modify temperature profile to have a surface mixed layer...
-mixed_layer_depth = 20
-mixed_layer_temperature = linear_temperature(0, 0, -mixed_layer_depth)
-
-mixed_layer_temperature_profile(x, y, z) =
-    z < -mixed_layer_depth ? linear_temperature_profile(x, y, z) : mixed_layer_temperature
-
-set!(model, T=mixed_layer_temperature_profile)
+mixed_layer_depth = 15
+mixed_layer_profile(x, y, z) = linear_profile(x, y, min(z, -mixed_layer_depth)) + 1e-4 * Ξ(z)
     
-# # Prepare the simulation
+set!(model, T=mixed_layer_profile)
+
+#
+# Simulation setup
+#
 
 # Adaptive time-stepping
-wizard = TimeStepWizard(cfl=1.0, Δt=1.0, max_change=1.1, max_Δt=30.0)
+wizard = TimeStepWizard(cfl=1.0, Δt=10.0, max_change=1.1, max_Δt=60.0)
 
 simulation = Simulation(model, Δt=wizard, stop_time=4hour, iteration_interval=10,
                         progress=SimulationProgressMessenger(model, wizard))
 
-# Prepare Output
+#
+# Output
+#
 
-prefix = @sprintf("hydroxide_plume_Qu%.1e_Qb%.1e_Nh%d_Nz%d", abs(Qᵘ), Qᵇ, grid.Nx, grid.Nz)
+prefix = @sprintf("hydroxide_plume_Qu%.1e_Qb%.1e_Nh%d_Nz%d",
+                  abs(surface_momentum_flux), surface_buoyancy_flux, grid.Nx, grid.Nz)
 
-# Fields and slices
 
 if !plot_only
+
+    # Fields and slices
     simulation.output_writers[:fields] = JLD2OutputWriter(model, merge(model.velocities, model.tracers); 
                                                           time_interval = 1hour, # every quarter period
                                                                  prefix = prefix * "_fields",
                                                                   force = true)
     
     simulation.output_writers[:slices] = JLD2OutputWriter(model, merge(model.velocities, model.tracers),
-                                                          time_interval = 1minute,
+                                                          time_interval = 2minute,
                                                                  prefix = prefix * "_slices",
                                                            field_slicer = FieldSlicer(j=floor(Int, grid.Ny/2)),
                                                                   force = true)
@@ -137,16 +150,19 @@ if !plot_only
     averaged_fields_and_fluxes = (u=U, v=V, T=T, OH⁻=OH⁻, wT=wT, wOH⁻=wOH⁻)
     
     simulation.output_writers[:averages] = JLD2OutputWriter(model, averaged_fields_and_fluxes,
-                                                            time_interval = 1minute,
+                                                            time_interval = 2minute,
                                                                   prefix = prefix * "_averages",
                                                                    force = true)
     
-    # # Run
-    
+    @info "Simulation setup complete; starting the simulation."
+    @info @sprintf("Elapsed time so far: %s", prettytime((time_ns() - start_time) * 1e-9))
+
     run!(simulation)
 end
 
-# # Load and plot turbulence statistics
+#
+# Visualization
+#
 
 """ Returns colorbar levels equispaced from `(-clim, clim)` and encompassing the extrema of `c`. """
 function divergent_levels(c, clim, nlevels=30)
@@ -172,39 +188,53 @@ file = jldopen(prefix * "_slices.jld2")
 
 iterations = parse.(Int, keys(file["timeseries/t"]))
 
+# Start the animation partway through to reduce the size of the movie file
+niterations = length(iterations)
+istart = floor(Int, niterations/4)
+
 # This utility is handy for calculating nice contour intervals:
 
 @info "Making an animation from the saved data..."
 
-anim = @animate for (i, iter) in enumerate(iterations)
+anim = @animate for (i, iter) in enumerate(iterations[istart:end])
+
+    # Use same names as fields used above for data loaded from file
+    local u
+    local w
+    local T
+    local OH⁻
 
     @info "Drawing frame $i from iteration $iter \n"
 
     t = file["timeseries/t/$iter"]
 
     ## Load 3D fields from file
-    w = file["timeseries/w/$iter"][:, 1, :]
     u = file["timeseries/u/$iter"][:, 1, :]
+    w = file["timeseries/w/$iter"][:, 1, :]
+    T = file["timeseries/T/$iter"][:, 1, :]
     OH⁻ = file["timeseries/OH⁻/$iter"][:, 1, :]
 
     wlims, wlevels = divergent_levels(w, 0.8*maximum(abs, w) + 1e-9)
     ulims, ulevels = divergent_levels(u, 0.8*maximum(abs, u) + 1e-9)
-    OH⁻lims, OH⁻levels = sequential_levels(OH⁻, (0, 0.8*maximum(abs, OH⁻) + 1e-9))
+    OH⁻lims, OH⁻levels = sequential_levels(OH⁻, (0, 0.8*maximum(OH⁻) + 1e-9))
+    Tlims, Tlevels = sequential_levels(OH⁻, (minimum(T), maximum(T)))
 
      kwargs = (linewidth=0, xlabel="x (m)", ylabel="z (m)", aspectratio=1,
                xlims=(-grid.Lx/2, grid.Lx/2), ylims=(-grid.Lz, 0))
 
     w_plot = contourf(xw, zw, w'; color=:balance, clims=wlims, levels=wlevels, kwargs...)
     u_plot = contourf(xu, zu, u'; color=:balance, clims=ulims, levels=ulevels, kwargs...)
+    T_plot = contourf(xc, zc, T'; color=:thermal, clims=Tlims, levels=Tlevels, kwargs...)
     OH⁻_plot = contourf(xc, zc, OH⁻'; color=:thermal,  clims=OH⁻lims, levels=OH⁻levels, kwargs...)
 
     w_title = @sprintf("w(y=0, t=%s) (m s⁻¹), ", prettytime(t))
     u_title = @sprintf("u(y=0, t=%s) (m s⁻¹), ", prettytime(t))
+    T_title = @sprintf("θ(y=0, t=%s) (m s⁻¹), ", prettytime(t))
     OH⁻_title = @sprintf("OH⁻(y=0, t=%s) (m s⁻¹), ", prettytime(t))
 
     ## Arrange the plots side-by-side.
-    plot(w_plot, u_plot, OH⁻_plot, layout=(1, 3), size=(2000, 400),
-         title=[w_title u_title OH⁻_title])
+    plot(w_plot, T_plot, OH⁻_plot, layout=(1, 3), size=(2000, 400),
+         title=[w_title T_title OH⁻_title])
 
     iter == iterations[end] && close(file)
 end
