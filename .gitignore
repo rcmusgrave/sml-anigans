@@ -1,1 +1,40 @@
+# Julia stuff
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+*.mem
+deps/deps.jl
+
+# Swap files.
 *.swp
+*~
+
+# Documenter.jl and MkDocs
+docs/Manifest.toml
+docs/build
+docs/site
+docs/src/generated
+
+# Model output
+*.dat
+*.nc
+*.jld2
+
+# Checkpointer model serialization
+*.jlser
+*.jld
+
+# Plots
+*.png
+*.gif
+*.mp4
+
+# Jupyter Lab stuff and notebooks
+*.ipynb
+.ipynb_checkpoints
+
+# MacOS stuff
+*.DS_Store
+
+# VSCode
+.vscode
